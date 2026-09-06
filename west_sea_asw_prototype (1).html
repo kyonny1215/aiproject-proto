@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>서해 대잠 탐지환경 개념 프로토타입 (공개자료 기반 데모)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; height:100%; font-family: -apple-system, BlinkMacSystemFont, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; color:#1a1a1a; }
+  header { background:#0f2c4c; color:#fff; padding:10px 16px; }
+  header h1 { font-size:16px; margin:0 0 2px; font-weight:600; }
+  header p { font-size:12px; margin:0; color:#bcd0e6; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:#f3f5f7; padding:8px 16px; border-bottom:1px solid #dfe3e8; }
+  .controls button { border:1px solid #c7ccd1; background:#fff; padding:6px 12px; border-radius:6px; font-size:13px; cursor:pointer; }
+  .controls button.active { background:#0f2c4c; color:#fff; border-color:#0f2c4c; }
+  .controls input { width:100px; padding:5px 7px; border:1px solid #c7ccd1; border-radius:6px; font-size:13px; }
+  .controls .errMsg { color:#c23b3b; font-size:12px; }
+  .app { display:flex; height: calc(100vh - 96px); min-height:480px; }
+  #map { flex: 1 1 auto; min-width:0; }
+  #sidebar { width:320px; flex:0 0 320px; background:#fff; border-left:1px solid #dfe3e8; padding:14px; overflow-y:auto; }
+  #sidebar h2 { font-size:14px; margin:0 0 10px; }
+  .legend { display:flex; flex-direction:column; gap:6px; font-size:12px; color:#555; margin-bottom:14px; }
+  .legend span.dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  .badge { display:inline-block; padding:4px 12px; border-radius:6px; font-size:13px; font-weight:600; color:#fff; margin-bottom:10px; }
+  .statRow { display:flex; justify-content:space-between; font-size:13px; padding:6px 0; border-bottom:1px solid #eee; }
+  .statRow span:first-child { color:#666; }
+  .chartWrap { position:relative; height:200px; margin-top:14px; }
+  .disclaimer { font-size:11px; color:#888; margin-top:16px; line-height:1.5; }
+  .pin { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; color:#fff; font-size:13px; box-shadow:0 1px 4px rgba(0,0,0,.45); border:2px solid #fff; }
+  .pin-favorable { background:#2f7d1f; }
+  .pin-neutral { background:#b5750e; }
+  .pin-unfavorable { background:#b03030; }
+  @media (max-width:720px){
+    .app { flex-direction:column; height:auto; }
+    #map { height:60vh; }
+    #sidebar { width:auto; flex:none; border-left:none; border-top:1px solid #dfe3e8; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>서해 대잠 탐지환경 개념 프로토타입</h1>
+  <p>공개 해양자료 기반 데모 · 국립해양조사원/국립수산과학원 실데이터 연동 전 단계 (현재는 가상 계산값)</p>
+</header>
+
+<div class="controls">
+  <button id="btnSummer" class="active" onclick="setSeason('summer')">여름철</button>
+  <button id="btnWinter" onclick="setSeason('winter')">겨울철</button>
+  <input type="number" id="latInput" placeholder="위도 35.90~38.2" step="0.01">
+  <input type="number" id="lngInput" placeholder="경도 123.8~127.2" step="0.01">
+  <button onclick="goToCoord()">좌표 이동</button>
+  <span class="errMsg" id="errMsg" style="display:none"></span>
+</div>
+
+<div class="app">
+  <div id="map"></div>
+  <aside id="sidebar">
+    <h2>탐지환경 범례</h2>
+    <div class="legend">
+      <div><span class="dot" style="background:#2f7d1f"></span>탐지 유리 (혼합층, 열사층 약함)</div>
+      <div><span class="dot" style="background:#b5750e"></span>중립</div>
+      <div><span class="dot" style="background:#b03030"></span>탐지 불리 (열사층 강함)</div>
+    </div>
+    <div id="detailPane">
+      <p style="font-size:13px;color:#888">지도를 클릭하거나 좌표를 입력해 해역을 선택하세요.</p>
+    </div>
+    <div class="chartWrap">
+      <canvas id="profileChart" role="img" aria-label="선택 지점 수심별 수온 변화 그래프"></canvas>
+    </div>
+    <div class="disclaimer">
+      본 프로토타입은 교육·참고용 데모입니다. 표시되는 수치는 실제 관측값이 아닌 가상 계산값이며, 실제 서비스에서는 국립해양조사원 바다누리 해양정보 서비스, 국립수산과학원 실시간 해양환경 정보 등 공개 API로 대체되어야 합니다. 정밀 탐지거리·소나 성능 정보는 포함하지 않으며, 실제 작전 판단에 사용할 수 없습니다.
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const LAT_MIN=35.90, LAT_MAX=38.2, LNG_MIN=123.8, LNG_MAX=127.2;
+let season='summer';
+let currentLat=null, currentLng=null;
+let currentMarker=null;
+let chart=null;
+
+let map;
+const boundsRect = L.latLngBounds([LAT_MIN, LNG_MIN], [LAT_MAX, LNG_MAX]);
+const presetPoints = [
+  {name:'백령도 인근', lat:37.95, lng:124.65},
+  {name:'인천 근해', lat:37.10, lng:125.55},
+  {name:'태안 근해', lat:36.55, lng:125.55}
+];
+
+function sizeMapContainer(){
+  const mapDiv = document.getElementById('map');
+  const headerH = document.querySelector('header').offsetHeight;
+  const controlsH = document.querySelector('.controls').offsetHeight;
+  if (window.innerWidth <= 720){
+    mapDiv.style.height = Math.round(window.innerHeight * 0.6) + 'px';
+  } else {
+    mapDiv.style.height = Math.max(300, window.innerHeight - headerH - controlsH) + 'px';
+  }
+}
+
+function fitToBoundary(){
+  map.invalidateSize(true);
+  const fitZoom = map.getBoundsZoom(boundsRect, false);
+  map.setMinZoom(fitZoom);
+  map.setMaxBounds(boundsRect);
+  map.options.maxBoundsViscosity = 1.0;
+  map.fitBounds(boundsRect, {animate:false});
+}
+
+function initApp(){
+  sizeMapContainer();
+  map = L.map('map', {maxZoom:12});
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 12,
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+  L.rectangle(boundsRect, {color:'#0f2c4c', weight:1, fill:false, dashArray:'4,4'}).addTo(map);
+  fitToBoundary();
+
+  window.addEventListener('resize', function(){
+    sizeMapContainer();
+    fitToBoundary();
+  });
+
+  map.on('click', function(e){
+    selectPoint(e.latlng.lat, e.latlng.lng);
+  });
+
+  presetPoints.forEach(function(p){
+    const d0 = cellData(p.lat,p.lng,season);
+    const v0 = verdictOf(d0.gradient);
+    const m = L.marker([p.lat,p.lng], {icon: makeIcon(v0)}).addTo(map);
+    m.bindTooltip(p.name);
+    m.on('click', function(){ selectPoint(p.lat,p.lng); });
+  });
+
+  selectPoint(presetPoints[1].lat, presetPoints[1].lng);
+}
+
+
+function seededRand(a,b){
+  let x = Math.sin(a*12.9898 + b*78.233) * 43758.5453;
+  return x - Math.floor(x);
+}
+function round1(v){ return Math.round(v*10)/10; }
+
+function cellData(lat,lng,s){
+  const a = Math.round(lat*20), b = Math.round(lng*20);
+  const warmFactor = (LAT_MAX - lat) / (LAT_MAX - LAT_MIN);
+  const depth = Math.round(20 + seededRand(a,b) * 70);
+  const noise = (seededRand(a+3,b+7) - 0.5) * 2;
+  let surfaceT, bottomT;
+  if (s === 'summer') {
+    surfaceT = 23 + warmFactor*4 + noise*0.8;
+    const strat = Math.max(2, (depth/90)*13 + noise*1.5);
+    bottomT = surfaceT - strat;
+  } else {
+    surfaceT = 3 + warmFactor*5 + noise*0.6;
+    const mixDiff = 0.5 + (1-depth/90)*0.5 + Math.abs(noise)*0.3;
+    bottomT = surfaceT - mixDiff;
+  }
+  surfaceT = round1(surfaceT); bottomT = round1(bottomT);
+  const gradient = round1(((surfaceT-bottomT)/depth)*10);
+  return {depth, surfaceT, bottomT, gradient};
+}
+
+function verdictOf(g){
+  if (g > 1.4) return {key:'unfavorable', label:'탐지 불리', letter:'불', color:'#b03030'};
+  if (g > 0.7) return {key:'neutral', label:'중립', letter:'중', color:'#b5750e'};
+  return {key:'favorable', label:'탐지 유리', letter:'유', color:'#2f7d1f'};
+}
+
+function makeIcon(v){
+  return L.divIcon({
+    html: '<div class="pin pin-'+v.key+'">'+v.letter+'</div>',
+    className: '',
+    iconSize: [28,28],
+    iconAnchor: [14,14]
+  });
+}
+
+function profilePoints(depth, surfaceT, bottomT){
+  const pts = [];
+  const steps = 8;
+  for (let i=0;i<=steps;i++){
+    const d = depth*i/steps;
+    let t;
+    if (season === 'summer'){
+      const mixedDepth = depth*0.25, thermoclineEnd = depth*0.55;
+      if (d <= mixedDepth) t = surfaceT;
+      else if (d <= thermoclineEnd){
+        const frac = (d-mixedDepth)/(thermoclineEnd-mixedDepth);
+        t = surfaceT - (surfaceT-bottomT)*frac;
+      } else t = bottomT;
+    } else {
+      const frac = d/depth;
+      t = surfaceT - (surfaceT-bottomT)*frac;
+    }
+    pts.push({x: round1(t), y: Math.round(d)});
+  }
+  return pts;
+}
+
+function updateChart(points){
+  if (!chart){
+    const ctx = document.getElementById('profileChart');
+    chart = new Chart(ctx, {
+      type:'line',
+      data:{ datasets:[{ label:'수온 프로파일', data:points, borderColor:'#2a78d6', backgroundColor:'transparent', tension:0.3, pointRadius:3, pointBackgroundColor:'#2a78d6' }]},
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        parsing:{ xAxisKey:'x', yAxisKey:'y' },
+        plugins:{ legend:{ display:false } },
+        scales:{
+          x:{ type:'linear', position:'bottom', title:{ display:true, text:'수온(°C)' } },
+          y:{ reverse:true, title:{ display:true, text:'수심(m)' } }
+        }
+      }
+    });
+  } else {
+    chart.data.datasets[0].data = points;
+    chart.update();
+  }
+}
+
+function renderDetail(lat,lng){
+  const d = cellData(lat,lng,season);
+  const v = verdictOf(d.gradient);
+  const seasonLabel = season==='summer' ? '여름철' : '겨울철';
+  let html = '';
+  html += '<div class="badge" style="background:'+v.color+'">'+v.label+' ('+seasonLabel+')</div>';
+  html += '<div class="statRow"><span>좌표</span><span>'+lat.toFixed(2)+'°N, '+lng.toFixed(2)+'°E</span></div>';
+  html += '<div class="statRow"><span>수심</span><span>'+d.depth+' m</span></div>';
+  html += '<div class="statRow"><span>표층 수온</span><span>'+d.surfaceT+' °C</span></div>';
+  html += '<div class="statRow"><span>저층 수온</span><span>'+d.bottomT+' °C</span></div>';
+  html += '<div class="statRow"><span>변화율(10m당)</span><span>'+d.gradient+' °C</span></div>';
+  document.getElementById('detailPane').innerHTML = html;
+  updateChart(profilePoints(d.depth, d.surfaceT, d.bottomT));
+}
+
+function selectPoint(lat,lng){
+  currentLat = lat; currentLng = lng;
+  const d = cellData(lat,lng,season);
+  const v = verdictOf(d.gradient);
+  if (currentMarker) map.removeLayer(currentMarker);
+  currentMarker = L.marker([lat,lng], {icon: makeIcon(v)}).addTo(map);
+  const popupHtml = '<div style="position:relative;padding-right:16px;min-width:140px;">'
+    + '<span onclick="map.closePopup();" style="position:absolute;top:-6px;right:-10px;cursor:pointer;font-size:15px;font-weight:700;color:#888;line-height:1;">&times;</span>'
+    + v.label + '<br>표층 ' + d.surfaceT + '°C / 저층 ' + d.bottomT + '°C'
+    + '</div>';
+  currentMarker.bindPopup(popupHtml, {closeButton:false}).openPopup();
+  renderDetail(lat,lng);
+}
+
+function setSeason(s){
+  season = s;
+  document.getElementById('btnSummer').classList.toggle('active', s==='summer');
+  document.getElementById('btnWinter').classList.toggle('active', s==='winter');
+  if (currentLat !== null) selectPoint(currentLat, currentLng);
+}
+
+function goToCoord(){
+  const errEl = document.getElementById('errMsg');
+  const lat = parseFloat(document.getElementById('latInput').value);
+  const lng = parseFloat(document.getElementById('lngInput').value);
+  if (isNaN(lat) || isNaN(lng) || lat < LAT_MIN || lat > LAT_MAX || lng < LNG_MIN || lng > LNG_MAX){
+    errEl.textContent = '범위 내 위도(35.90~38.2), 경도(123.8~127.2) 값을 입력하세요.';
+    errEl.style.display = 'inline';
+    return;
+  }
+  errEl.style.display = 'none';
+  map.setView([lat,lng], 8);
+  selectPoint(lat,lng);
+}
+
+window.addEventListener('load', initApp);
+</script>
+</body>
+</html>
